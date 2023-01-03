@@ -1,0 +1,141 @@
+library(rhdfs)
+hdfs.init()
+library(rmr2)
+
+rmr.options("hadoop")
+
+# 폴더에 포함된 파일 목록 files에 할당
+files <- hdfs.ls("/data/taxi/combined")$file
+info.format <- make.input.format( format = "csv", 
+                                  sep = ",", 
+                                  colClasses = "character", 
+                                  stringsAsFactors = FALSE )
+
+res <- from.dfs(input = files[1], format = info.format)
+info <- values(res)
+
+colnames.tmp <- as.character(info[,1])
+colclass.tmp <- as.character(info[,2])
+
+colnames <- colnames.tmp[-1]
+colclasses <- colclass.tmp[-1]
+
+colclasses[c(6,8,9,10)] <- "numeric"
+
+taxi.format <- make.input.format(format = "csv", sep = ",",
+                                 col.names = colnames,
+                                 colClasses = colclasses,
+                                 stringsAsFactors = FALSE)
+
+
+files <- files[-1]; files
+
+# 2013년 뉴욕 불쾌지수 데이터 가져오기
+discomfort_csv <- read.csv("month_day_num.csv");
+dc1 <- as.numeric(discomfort_csv[1,])
+dc2 <- as.numeric(discomfort_csv[2,])
+dc3 <- as.numeric(discomfort_csv[3,])
+dc4 <- as.numeric(discomfort_csv[4,])
+dc5 <- as.numeric(discomfort_csv[5,])
+dc6 <- as.numeric(discomfort_csv[6,])
+dc7 <- as.numeric(discomfort_csv[7,])
+dc8 <- as.numeric(discomfort_csv[8,])
+dc9 <- as.numeric(discomfort_csv[9,])
+dc10 <- as.numeric(discomfort_csv[10,])
+dc11 <- as.numeric(discomfort_csv[11,])
+dc12 <- as.numeric(discomfort_csv[12,])
+
+## 카이제곱 map 함수
+chi.map.fun <- function(k, v){
+  taxi <- v
+  taxi <- taxi[taxi$payment_type=="CRD",] # payment_type == CRD
+  taxi <- taxi[(taxi$fare_amount>=2.5),] # fare_amount >= 2.5
+  taxi <- taxi[(taxi$rate_code==1)|(taxi$rate_code==2)|(taxi$rate_code==3)|(taxi$rate_code==4)|(taxi$rate_code==5)|(taxi$rate_code==6),] # rate_code == 1,2,3,4,5,6
+  taxi <- taxi[(taxi$passenger_count>=1),] # passenger_count >= 1
+  taxi <- taxi[(taxi$trip_time_in_secs>0&taxi$trip_time_in_secs<10000),] # 0 < trip_time_in_secs < 10000
+  taxi <- taxi[(taxi$trip_distance>0) & (taxi$trip_distance<200),] # 0 < trip_distance < 200
+  taxi <- taxi[(taxi$pickup_longitude>(-80)) & (taxi$pickup_longitude<(-70)),] # -80 < pickup_longitude < -70
+  taxi <- taxi[(taxi$pickup_latitude>40) & (taxi$pickup_latitude<46),] # 40 < pickup_latitude < 46
+  taxi <- taxi[(taxi$dropoff_longitude>(-80)) & (taxi$dropoff_longitude<(-70)),] # -80 < dropoff_longitude < -70
+  taxi <- taxi[(taxi$dropoff_latitude>40) & (taxi$dropoff_latitude<46),] # 40 < dropoff_latitude < 46
+  
+  taxi$discomfort <- -1
+  month <- as.integer(substr(taxi$pickup_datetime, 6, 7))
+  date <- as.integer(substr(taxi$pickup_datetime, 9, 10))
+  
+  taxi$pickup_month <- month
+  taxi$pickup_date <- date
+  
+  # 불쾌지수 뽑아서 넣기
+  ifelse(month == 1, taxi$discomfort <- dc1[date], NA)
+  ifelse(month == 2, taxi$discomfort <- dc2[date], NA)
+  ifelse(month == 3, taxi$discomfort <- dc3[date], NA)
+  ifelse(month == 4, taxi$discomfort <- dc4[date], NA)
+  ifelse(month == 5, taxi$discomfort <- dc5[date], NA)
+  ifelse(month == 6, taxi$discomfort <- dc6[date], NA)
+  ifelse(month == 7, taxi$discomfort <- dc7[date], NA)
+  ifelse(month == 8, taxi$discomfort <- dc8[date], NA)
+  ifelse(month == 9, taxi$discomfort <- dc9[date], NA)
+  ifelse(month == 10, taxi$discomfort <- dc10[date], NA)
+  ifelse(month == 11, taxi$discomfort <- dc11[date], NA)
+  ifelse(month == 12, taxi$discomfort <- dc12[date], NA)
+  
+  tip_ratio <- taxi$tip_amount / taxi$total_amount
+  taxi$tip_ratio <- tip_ratio
+  
+  taxi$tip_ratio_index <- 1
+  #ifelse(tip_ratio < 0.1, dat9$tip_ratio_index <- 0, dat9$tip_ratio_index <- 1)
+  ind10 <- ((taxi$tip_amount / taxi$total_amount) < 0.1)
+  taxi[ind10,]$tip_ratio_index <- 0
+  #ifelse(tip_ratio > 0.2, dat9$tip_ratio_index <- 2, NA)
+  ind11 <- ((taxi$tip_amount / taxi$total_amount) > 0.2)
+  taxi[ind11,]$tip_ratio_index <- 2
+  
+  taxi
+}
+
+chi.mr <- mapreduce( input = files, 
+                 input.format = taxi.format,
+                 map = chi.map.fun)
+
+
+chi.res <- from.dfs(mr)
+
+
+## 이원 카이제곱 검정
+# 각 집단 당 개수를 100만개로 맞추기
+data <- res$val
+
+data0 <- data[data$discomfort == 0,]
+data1 <- data[data$discomfort == 1,]
+data2 <- data[data$discomfort == 2,]
+
+set.seed(123)
+t0 <- sample(nrow(data0), 1000000, replace = F)
+t1 <- sample(nrow(data1), 1000000, replace = F)
+t2 <- sample(nrow(data2), 1000000, replace = F)
+
+data0 <- data0[t0,]
+data1 <- data1[t1,]
+data2 <- data2[t2,]
+
+total <- rbind(data0, data1)
+total <- rbind(total, data2)
+
+# 변수 리코딩
+
+total$discomfort2[total$discomfort == 0] <- "3. 불쾌"
+total$discomfort2[total$discomfort == 1] <- "2. 중간"
+total$discomfort2[total$discomfort == 2] <- "1. 상쾌"
+
+total$tip_ratio_index2[total$tip_ratio_index == 0] <- "1. 이하"
+total$tip_ratio_index2[total$tip_ratio_index == 1] <- "2. 적정(10~20%)"
+total$tip_ratio_index2[total$tip_ratio_index == 2] <- "3. 이상"
+
+
+# 교차 분할표 작성
+table(total$discomfort2, total$tip_ratio_index2)
+
+
+# 동질성 검사 - 모두 특성치에 대한 추론검정
+chisq.test(total$discomfort2, total$tip_ratio_index2)
